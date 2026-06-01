@@ -37,12 +37,12 @@ hda_dir="$build_dir/hda"
 [[ ! -d $build_dir ]] && mkdir $build_dir
 
 # attempt to download linux-x.x.x.tar.xz kernel
-wget -c https://cdn.kernel.org/pub/linux/kernel/v$major_version.x/linux-$kernel_version.tar.xz -P $build_dir
+wget -4 -c https://cdn.kernel.org/pub/linux/kernel/v$major_version.x/linux-$kernel_version.tar.xz -P $build_dir
 
 if [[ $? -ne 0 ]]; then
    # if first attempt fails, attempt to download linux-x.x.tar.xz kernel
    kernel_version=$kernel_short_version
-   wget -c https://cdn.kernel.org/pub/linux/kernel/v$major_version.x/linux-$kernel_version.tar.xz -P $build_dir
+   wget -4 -c https://cdn.kernel.org/pub/linux/kernel/v$major_version.x/linux-$kernel_version.tar.xz -P $build_dir
 fi
 
 [[ $? -ne 0 ]] && echo "kernel could not be downloaded...exiting" && exit
@@ -55,14 +55,14 @@ if (( major_version > 6 || (major_version == 6 && minor_version >= 17) )); then
     tar --strip-components=2 -xvf $build_dir/linux-$kernel_version.tar.xz --directory=build/ linux-$kernel_version/sound/hda
     mv $hda_dir/codecs/cirrus/Makefile $hda_dir/codecs/cirrus/Makefile.orig
     mv $hda_dir/codecs/cirrus/cs420x.c $hda_dir/codecs/cirrus/cs420x.c.orig
-    cp $patch_dir/cs420x.c $patch_dir/patch_cirrus_a1534_setup.h $patch_dir/patch_cirrus_a1534_pcm.h $hda_dir/codecs/cirrus
+    cp $patch_dir/cs420x.c $patch_dir/patch_cirrus_a1534_setup.h $patch_dir/patch_cirrus_a1534_pcm.h $patch_dir/patch_cirrus_a1534_verbs.h $hda_dir/codecs/cirrus
     cp $patch_dir/$makefile_name $hda_dir/codecs/cirrus/Makefile
 else
     makefile_name="Makefile_cirrus"
     tar --strip-components=3 -xvf $build_dir/linux-$kernel_version.tar.xz --directory=build/ linux-$kernel_version/sound/pci/hda
     mv $hda_dir/Makefile $hda_dir/Makefile.orig
     mv $hda_dir/patch_cirrus.c $hda_dir/patch_cirrus.c.orig
-    cp $patch_dir/patch_cirrus.c $patch_dir/patch_cirrus_a1534_setup.h $patch_dir/patch_cirrus_a1534_pcm.h $hda_dir/
+    cp $patch_dir/patch_cirrus.c $patch_dir/patch_cirrus_a1534_setup.h $patch_dir/patch_cirrus_a1534_pcm.h $patch_dir/patch_cirrus_a1534_verbs.h $hda_dir/
     cp $patch_dir/$makefile_name $hda_dir/Makefile
 fi
 

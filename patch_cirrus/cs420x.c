@@ -263,6 +263,7 @@ static void init_digital_coef(struct hda_codec *codec)
 	cs_vendor_coef_set(codec, IDX_SPDIF_CTL, coef);
 }
 
+
 static int cs_init(struct hda_codec *codec)
 {
 	struct cs_spec *spec = codec->spec;
@@ -481,6 +482,7 @@ static void cs420x_fixup_gpio_23(struct hda_codec *codec,
 	}
 }
 
+#include "patch_cirrus_a1534_verbs.h"
 #include "patch_cirrus_a1534_setup.h"
 
 static const struct hda_fixup cs420x_fixups[] = {
@@ -732,6 +734,7 @@ static int cs4208_probe(struct hda_codec *codec)
 	//mb9-specific
 	err = setup_a1534(codec);
 	err = play_a1534(codec);
+
 	hda_codec_to_driver(codec)->ops = &cs_4208_patch_ops_explicit;
 	spec->gen.pcm_playback_hook = cs_4208_playback_pcm_hook;
 	//end

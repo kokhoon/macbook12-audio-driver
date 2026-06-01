@@ -337,12 +337,29 @@ static void cs_4208_free_explicit(struct hda_codec *codec)
 	kfree(codec->spec);
 }
 
+static int cs_4208_resume_explicit(struct hda_codec *codec)
+{
+	//codec_info(codec, "cs_4208_resume_explicit enters");
+        snd_hda_sequence_write(codec, cs4208_a1534_resume_verbs);
+	//codec_info(codec, "cs_4208_resume_explicit exits");
+
+	return 0;
+}
+
+static int cs_4208_suspend_explicit(struct hda_codec *codec)
+{
+	//codec_info(codec, "cs_4208_suspend_explicit enters");
+	return 0;
+}
+
 // real def is CONFIG_PM
 static const struct hda_codec_ops cs_4208_patch_ops_explicit = {
 	.build_controls = cs_4208_build_controls_explicit,
 	.build_pcms = cs_4208_build_pcms_explicit,
 	.init = cs_4208_init_explicit,
 	.free = cs_4208_free_explicit,
+        .suspend = cs_4208_suspend_explicit,
+        .resume = cs_4208_resume_explicit,
 	//.unsol_event = snd_hda_jack_unsol_event, //cs_4208_jack_unsol_event,
 //#ifdef UNDEF_CONFIG_PM
 //      .suspend = cs_4208_suspend,

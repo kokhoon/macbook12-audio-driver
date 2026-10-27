@@ -1,0 +1,1220 @@
+--- a/codecs/ca0132.c
++++ b/codecs/ca0132.c
+@@ -5508,6 +5508,30 @@
+ 	return 0;
+ }
+ 
++/*
++ * Manual output selection (HP/Speaker Playback Switch or alt Output Select)
++ * is meaningful only when HP/Speaker auto-detect is disabled, since the
++ * select_out path always prefers jack presence when auto-detect is on. When
++ * the user explicitly chooses an output, turn auto-detect off so the manual
++ * choice actually takes effect, and notify userspace so the auto-detect
++ * control reflects the new state.
++ */
++static void ca0132_disable_hp_auto_detect(struct hda_codec *codec)
++{
++	struct ca0132_spec *spec = codec->spec;
++	struct snd_kcontrol *kctl;
++
++	if (!spec->vnode_lswitch[VNID_HP_ASEL - VNODE_START_NID])
++		return;
++
++	spec->vnode_lswitch[VNID_HP_ASEL - VNODE_START_NID] = 0;
++	kctl = snd_hda_find_mixer_ctl(codec,
++				      "HP/Speaker Auto Detect Playback Switch");
++	if (kctl)
++		snd_ctl_notify(codec->card, SNDRV_CTL_EVENT_MASK_VALUE,
++			       &kctl->id);
++}
++
+ static int ca0132_vnode_switch_set(struct snd_kcontrol *kcontrol,
+ 				struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -5520,14 +5544,11 @@
+ 	int auto_jack;
+ 
+ 	if (nid == VNID_HP_SEL) {
+-		auto_jack =
+-			spec->vnode_lswitch[VNID_HP_ASEL - VNODE_START_NID];
+-		if (!auto_jack) {
+-			if (ca0132_use_alt_functions(spec))
+-				ca0132_alt_select_out(codec);
+-			else
+-				ca0132_select_out(codec);
+-		}
++		ca0132_disable_hp_auto_detect(codec);
++		if (ca0132_use_alt_functions(spec))
++			ca0132_alt_select_out(codec);
++		else
++			ca0132_select_out(codec);
+ 		return 1;
+ 	}
+ 
+@@ -5988,7 +6009,6 @@
+ 	struct ca0132_spec *spec = codec->spec;
+ 	int sel = ucontrol->value.enumerated.item[0];
+ 	unsigned int items = NUM_OF_OUTPUTS;
+-	unsigned int auto_jack;
+ 
+ 	if (sel >= items)
+ 		return 0;
+@@ -5998,10 +6018,8 @@
+ 
+ 	spec->out_enum_val = sel;
+ 
+-	auto_jack = spec->vnode_lswitch[VNID_HP_ASEL - VNODE_START_NID];
+-
+-	if (!auto_jack)
+-		ca0132_alt_select_out(codec);
++	ca0132_disable_hp_auto_detect(codec);
++	ca0132_alt_select_out(codec);
+ 
+ 	return 1;
+ }
+--- a/codecs/cmedia.c
++++ b/codecs/cmedia.c
+@@ -46,13 +46,6 @@
+ 	if (err < 0)
+ 		goto error;
+ 
+-	err = snd_hda_parse_pin_defcfg(codec, cfg, NULL, 0);
+-	if (err < 0)
+-		goto error;
+-	err = snd_hda_gen_parse_auto_config(codec, cfg);
+-	if (err < 0)
+-		goto error;
+-
+ 	if (is_cmi8888) {
+ 		if (get_defcfg_device(snd_hda_codec_get_pincfg(codec, 0x10)) ==
+ 		    AC_JACK_HP_OUT) {
+--- a/codecs/conexant.c
++++ b/codecs/conexant.c
+@@ -168,9 +168,6 @@
+ {
+ 	unsigned int mic_present;
+ 
+-	/* fix some headset type recognize fail issue, such as EDIFIER headset */
+-	/* set micbias output current comparator threshold from 66% to 55%. */
+-	snd_hda_codec_write(codec, 0x1c, 0, 0x320, 0x010);
+ 	/* set OFF voltage for DFET from -1.2V to -0.8V, set headset micbias register
+ 	 * value adjustment trim from 2.2K ohms to 2.0K ohms.
+ 	 */
+@@ -1183,6 +1180,7 @@
+ static int cx_probe(struct hda_codec *codec, const struct hda_device_id *id)
+ {
+ 	struct conexant_spec *spec;
++	struct hda_jack_callback *callback;
+ 	int err;
+ 
+ 	codec_info(codec, "%s: BIOS auto-probing.\n", codec->core.chip_name);
+@@ -1198,7 +1196,12 @@
+ 	case 0x14f11f86:
+ 	case 0x14f11f87:
+ 		spec->is_cx11880_sn6140 = true;
+-		snd_hda_jack_detect_enable_callback(codec, 0x19, cx_update_headset_mic_vref);
++		callback = snd_hda_jack_detect_enable_callback(codec, 0x19,
++				cx_update_headset_mic_vref);
++		if (IS_ERR(callback)) {
++			err = PTR_ERR(callback);
++			goto error;
++		}
+ 		break;
+ 	}
+ 
+--- a/codecs/hdmi/hdmi.c
++++ b/codecs/hdmi/hdmi.c
+@@ -1549,6 +1549,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x83e2, "HP EliteDesk 800 G4", 1),
+ 	SND_PCI_QUIRK(0x103c, 0x83ef, "HP MP9 G4 Retail System AMS", 1),
+ 	SND_PCI_QUIRK(0x103c, 0x845a, "HP EliteDesk 800 G4 DM 65W", 1),
++	SND_PCI_QUIRK(0x103c, 0x8595, "HP EliteDesk 800 G5 Mini", 1),
+ 	SND_PCI_QUIRK(0x103c, 0x83f3, "HP ProDesk 400", 1),
+ 	SND_PCI_QUIRK(0x103c, 0x870f, "HP", 1),
+ 	SND_PCI_QUIRK(0x103c, 0x871a, "HP", 1),
+@@ -1687,6 +1688,9 @@
+ 		per_pin->channels = substream->runtime->channels;
+ 		per_pin->setup = true;
+ 
++		if (spec->ops.prepare)
++			spec->ops.prepare(codec, per_pin);
++
+ 		if (get_wcaps(codec, cvt_nid) & AC_WCAP_STRIPE) {
+ 			stripe = snd_hdac_get_stream_stripe_ctl(&codec->bus->core,
+ 								substream);
+@@ -2285,6 +2289,7 @@
+ enum {
+ 	MODEL_GENERIC,
+ 	MODEL_GF,
++	MODEL_LOONGSON,
+ };
+ 
+ static int generichdmi_probe(struct hda_codec *codec,
+@@ -2302,6 +2307,11 @@
+ 	if (id->driver_data == MODEL_GF)
+ 		codec->no_sticky_stream = 1;
+ 
++	if (id->driver_data == MODEL_LOONGSON) {
++		if (codec->bus && codec->bus->pci->revision == 0x2)
++			codec->eld_jack_detect = 1; /* Jack-detection by ELD */
++	}
++
+ 	return 0;
+ }
+ 
+@@ -2319,7 +2329,7 @@
+ /*
+  */
+ static const struct hda_device_id snd_hda_id_generichdmi[] = {
+-	HDA_CODEC_ID_MODEL(0x00147a47, "Loongson HDMI",		MODEL_GENERIC),
++	HDA_CODEC_ID_MODEL(0x00147a47, "Loongson HDMI",		MODEL_LOONGSON),
+ 	HDA_CODEC_ID_MODEL(0x10951390, "SiI1390 HDMI",		MODEL_GENERIC),
+ 	HDA_CODEC_ID_MODEL(0x10951392, "SiI1392 HDMI",		MODEL_GENERIC),
+ 	HDA_CODEC_ID_MODEL(0x11069f84, "VX11 HDMI/DP",		MODEL_GENERIC),
+--- a/codecs/hdmi/hdmi_local.h
++++ b/codecs/hdmi/hdmi_local.h
+@@ -74,6 +74,15 @@
+ 			    hda_nid_t pin_nid, int dev_id, u32 stream_tag,
+ 			    int format);
+ 
++	/*
++	 * Optional hook invoked at the beginning of the PCM prepare
++	 * sequence, before the audio infoframe and stream format are
++	 * (re)programmed. Used to disable keep-alive / silent stream so
++	 * that the format change is not done while keep-alive is active.
++	 */
++	void (*prepare)(struct hda_codec *codec,
++			struct hdmi_spec_per_pin *per_pin);
++
+ 	void (*pin_cvt_fixup)(struct hda_codec *codec,
+ 			      struct hdmi_spec_per_pin *per_pin,
+ 			      hda_nid_t cvt_nid);
+--- a/codecs/hdmi/intelhdmi.c
++++ b/codecs/hdmi/intelhdmi.c
+@@ -418,6 +418,28 @@
+ 		intel_not_share_assigned_cvt(codec, pin_nid, dev_id, mux_idx);
+ }
+ 
++/*
++ * prepare ops override for HSW+
++ *
++ * Disable keep-alive before the converter format and audio infoframe are
++ * reprogrammed by the PCM prepare sequence. Changing the audio format (e.g.
++ * the channel count when switching to multichannel PCM) while a keep-alive
++ * stream is active is not safe, so release keep-alive here, early in the
++ * sequence. It is re-enabled once the new stream has been set up, in
++ * i915_hsw_setup_stream().
++ */
++static void i915_hsw_prepare(struct hda_codec *codec,
++			     struct hdmi_spec_per_pin *per_pin)
++{
++	struct hdmi_spec *spec = codec->spec;
++
++	if (spec->silent_stream_type == SILENT_STREAM_KAE && per_pin->silent_stream) {
++		silent_stream_set_kae(codec, per_pin, false);
++		/* wait for pending transfers in codec to clear */
++		usleep_range(100, 200);
++	}
++}
++
+ /* setup_stream ops override for HSW+ */
+ static int i915_hsw_setup_stream(struct hda_codec *codec, hda_nid_t cvt_nid,
+ 				 hda_nid_t pin_nid, int dev_id, u32 stream_tag,
+@@ -435,15 +457,16 @@
+ 
+ 	haswell_verify_D0(codec, cvt_nid, pin_nid);
+ 
+-	if (spec->silent_stream_type == SILENT_STREAM_KAE && per_pin && per_pin->silent_stream) {
+-		silent_stream_set_kae(codec, per_pin, false);
+-		/* wait for pending transfers in codec to clear */
+-		usleep_range(100, 200);
+-	}
+-
+ 	res = snd_hda_hdmi_setup_stream(codec, cvt_nid, pin_nid, dev_id,
+ 					stream_tag, format);
+ 
++	/*
++	 * Keep-alive was disabled in i915_hsw_prepare(), re-enable it now.
++	 * The pin lookup above resolves to the same per_pin that prepare
++	 * used (pin_nid comes from that per_pin), so this stays balanced; a
++	 * NULL per_pin only occurs on a lookup failure that also implies no
++	 * active keep-alive stream to restore.
++	 */
+ 	if (spec->silent_stream_type == SILENT_STREAM_KAE && per_pin && per_pin->silent_stream) {
+ 		usleep_range(100, 200);
+ 		silent_stream_set_kae(codec, per_pin, true);
+@@ -607,6 +630,7 @@
+ 	codec->depop_delay = 0;
+ 	codec->auto_runtime_pm = 1;
+ 
++	spec->ops.prepare = i915_hsw_prepare;
+ 	spec->ops.setup_stream = i915_hsw_setup_stream;
+ 	spec->ops.pin_cvt_fixup = i915_pin_cvt_fixup;
+ 	spec->ops.silent_stream = i915_set_silent_stream;
+--- a/codecs/realtek/alc269.c
++++ b/codecs/realtek/alc269.c
+@@ -2296,9 +2296,9 @@
+ 		struct alc_spec *spec = codec->spec;
+ 		spec->parse_flags |= HDA_PINCFG_HEADSET_MIC;
+ 		alc255_set_default_jack_type(codec);
+-	}
+-	else
++	} else {
+ 		alc_fixup_headset_mode(codec, fix, action);
++	}
+ }
+ 
+ static void alc288_update_headset_jack_cb(struct hda_codec *codec,
+@@ -3397,6 +3397,19 @@
+ 	}
+ }
+ 
++static void alc256_fixup_xiaomi_pro15_resume(struct hda_codec *codec,
++					     const struct hda_fixup *fix,
++					     int action)
++{
++	/*
++	 * On the Xiaomi Mi Laptop Pro 15 (TM1905, SSID 1d72:1905) the ALC256
++	 * codec sets coefficient 0x10 bit 9 to 1 after S3 resume, silencing
++	 * the internal speaker. Bluetooth and HDMI audio are unaffected.
++	 * Clear the bit so the speaker keeps working across suspend cycles.
++	 */
++	alc_update_coef_idx(codec, 0x10, 1<<9, 0);
++}
++
+ static void alc256_decrease_headphone_amp_val(struct hda_codec *codec,
+ 					      const struct hda_fixup *fix, int action)
+ {
+@@ -3661,22 +3674,11 @@
+ 				   struct snd_pcm_substream *substream,
+ 				   int action)
+ {
+-	static const struct coef_fw dis_coefs[] = {
+-		WRITE_COEF(0x24, 0x0013), WRITE_COEF(0x25, 0x0000), WRITE_COEF(0x26, 0xC203),
+-		WRITE_COEF(0x28, 0x0004), WRITE_COEF(0x29, 0xb023),
+-	}; /* Disable AMP silence detection */
+-	static const struct coef_fw en_coefs[] = {
+-		WRITE_COEF(0x24, 0x0013), WRITE_COEF(0x25, 0x0000), WRITE_COEF(0x26, 0xC203),
+-		WRITE_COEF(0x28, 0x0084), WRITE_COEF(0x29, 0xb023),
+-	}; /* Enable AMP silence detection */
+-
+ 	switch (action) {
+ 	case HDA_GEN_PCM_ACT_OPEN:
+-		alc_process_coef_fw(codec, dis_coefs);
+ 		alc_write_coefex_idx(codec, 0x5a, 0x00, 0x954f); /* write gpio3 to high */
+ 		break;
+ 	case HDA_GEN_PCM_ACT_CLOSE:
+-		alc_process_coef_fw(codec, en_coefs);
+ 		alc_write_coefex_idx(codec, 0x5a, 0x00, 0x554f); /* write gpio3 as default value */
+ 		break;
+ 	}
+@@ -3699,10 +3701,15 @@
+ 		WRITE_COEF(0x24, 0x0013), WRITE_COEF(0x25, 0x0000), WRITE_COEF(0x26, 0xC301),
+ 		WRITE_COEF(0x28, 0x0001), WRITE_COEF(0x29, 0xb023),
+ 	};
++	static const struct coef_fw dis_coefs[] = {
++		WRITE_COEF(0x24, 0x0013), WRITE_COEF(0x25, 0x0000), WRITE_COEF(0x26, 0xC203),
++		WRITE_COEF(0x28, 0x0004), WRITE_COEF(0x29, 0xb023),
++	}; /* Disable AMP silence detection */
+ 
+ 	if (action != HDA_FIXUP_ACT_PRE_PROBE)
+ 		return;
+ 	alc_update_coef_idx(codec, 0x10, 1<<11, 1<<11);
++	alc_process_coef_fw(codec, dis_coefs);
+ 	alc_process_coef_fw(codec, coefs);
+ 	spec->power_hook = alc287_s4_power_gpio3_default;
+ 	spec->gen.pcm_playback_hook = alc287_alc1318_playback_pcm_hook;
+@@ -3735,6 +3742,15 @@
+ 	alc_update_coef_idx(codec, 0x0b, 0x0c, val);
+ }
+ 
++static void alc245_hp_spk_mute_led_update_inverted(void *private_data, int enabled)
++{
++	struct hda_codec *codec = private_data;
++	unsigned int val;
++
++	val = enabled ? 0x04 : 0x08; /* inverted: 0x04 led off, 0x08 led on */
++	alc_update_coef_idx(codec, 0x0b, 0x0c, val);
++}
++
+ /* JD2: mute led GPIO3: micmute led */
+ static void alc245_tas2781_i2c_hp_fixup_muteled(struct hda_codec *codec,
+ 					  const struct hda_fixup *fix, int action)
+@@ -3763,6 +3779,33 @@
+ 		alc245_fixup_hp_mute_led_coefbit(codec, fix, action);
+ 	alc285_fixup_hp_coef_micmute_led(codec, fix, action);
+ }
++
++/* Same as alc245_tas2781_i2c_hp_fixup_muteled(), but with inverted speaker
++ * mute LED polarity. The HP ZBook 8 G2a 14/16 (0x103c:0x8f94, 0x103c:0x8f95)
++ * are speaker-only models without an HP pin, so the LED is driven directly
++ * through the vmaster_mute hook.
++ */
++static void alc245_tas2781_i2c_hp_fixup_muteled_inverted(struct hda_codec *codec,
++					const struct hda_fixup *fix, int action)
++{
++	struct alc_spec *spec = codec->spec;
++	static const hda_nid_t conn[] = { 0x02 };
++
++	switch (action) {
++	case HDA_FIXUP_ACT_PRE_PROBE:
++		spec->gen.vmaster_mute.hook = alc245_hp_spk_mute_led_update_inverted;
++		spec->gen.vmaster_mute_led = 1;
++		spec->gen.auto_mute_via_amp = 1;
++		snd_hda_override_conn_list(codec, 0x17, ARRAY_SIZE(conn), conn);
++		break;
++	case HDA_FIXUP_ACT_INIT:
++		alc245_hp_spk_mute_led_update_inverted(codec, !spec->gen.master_mute);
++		break;
++	}
++
++	tas2781_fixup_txnw_i2c(codec, fix, action);
++	alc285_fixup_hp_coef_micmute_led(codec, fix, action);
++}
+ /*
+  * Clear COEF 0x0d (PCBEEP passthrough) bit 0x40 where BIOS sets it wrongly
+  * at PM resume
+@@ -3864,6 +3907,7 @@
+ 	ALC269_FIXUP_DMIC_THINKPAD_ACPI,
+ 	ALC269VB_FIXUP_INFINIX_ZERO_BOOK_13,
+ 	ALC269VC_FIXUP_INFINIX_Y4_MAX,
++	ALC269VC_FIXUP_LUNNEN_GROUND_14,
+ 	ALC269VB_FIXUP_CHUWI_COREBOOK_XPRO,
+ 	ALC255_FIXUP_ACER_MIC_NO_PRESENCE,
+ 	ALC255_FIXUP_ASUS_MIC_NO_PRESENCE,
+@@ -4049,11 +4093,13 @@
+ 	ALC287_FIXUP_YOGA7_14ITL_SPEAKERS,
+ 	ALC298_FIXUP_LENOVO_C940_DUET7,
+ 	ALC287_FIXUP_LENOVO_YOGA_BOOK_9I,
++	ALC287_FIXUP_LENOVO_YOGA_PRO7,
+ 	ALC287_FIXUP_13S_GEN2_SPEAKERS,
+ 	ALC256_FIXUP_SET_COEF_DEFAULTS,
+ 	ALC256_FIXUP_SYSTEM76_MIC_NO_PRESENCE,
+ 	ALC233_FIXUP_NO_AUDIO_JACK,
+ 	ALC256_FIXUP_MIC_NO_PRESENCE_AND_RESUME,
++	ALC256_FIXUP_XIAOMI_PRO15_RESUME,
+ 	ALC285_FIXUP_LEGION_Y9000X_SPEAKERS,
+ 	ALC285_FIXUP_LEGION_Y9000X_AUTOMUTE,
+ 	ALC287_FIXUP_LEGION_16ACHG6,
+@@ -4067,6 +4113,7 @@
+ 	ALC245_FIXUP_CS35L41_SPI_4_HP_GPIO_LED,
+ 	ALC285_FIXUP_HP_SPEAKERS_MICMUTE_LED,
+ 	ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE,
++	ALC295_FIXUP_FRAMEWORK_LAPTOP_LIMIT_INT_MIC_BOOST,
+ 	ALC287_FIXUP_LEGION_16ITHG6,
+ 	ALC287_FIXUP_YOGA9_14IAP7_BASS_SPK,
+ 	ALC287_FIXUP_YOGA9_14IAP7_BASS_SPK_PIN,
+@@ -4117,6 +4164,7 @@
+ 	ALC256_FIXUP_VAIO_RPL_MIC_NO_PRESENCE,
+ 	ALC245_FIXUP_HP_TAS2781_SPI_MUTE_LED,
+ 	ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED,
++	ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED_INVERTED,
+ 	ALC288_FIXUP_SURFACE_SWAP_DACS,
+ 	ALC236_FIXUP_HP_MUTE_LED_MICMUTE_GPIO,
+ 	ALC233_FIXUP_LENOVO_GPIO2_MIC_HOTKEY,
+@@ -4124,6 +4172,8 @@
+ 	ALC245_FIXUP_ACER_MICMUTE_LED,
+ 	ALC245_FIXUP_CS35L41_I2C_2_MUTE_LED,
+ 	ALC236_FIXUP_HP_DMIC,
++	ALC245_FIXUP_HP_ENVY_X360_15_FH0XXX,
++	ALC236_FIXUP_DELL_HP_POP_NOISE,
+ };
+ 
+ /* A special fixup for Lenovo C940 and Yoga Duet 7;
+@@ -4313,6 +4363,13 @@
+ 		.chained = true,
+ 		.chain_id = ALC269_FIXUP_LIMIT_INT_MIC_BOOST
+ 	},
++	[ALC269VC_FIXUP_LUNNEN_GROUND_14] = {
++		.type = HDA_FIXUP_PINS,
++		.v.pins = (const struct hda_pintbl[]) {
++			{ 0x1b, 0x90170150 }, /* internal speaker */
++			{ }
++		},
++	},
+ 	[ALC269VB_FIXUP_CHUWI_COREBOOK_XPRO] = {
+ 		.type = HDA_FIXUP_PINS,
+ 		.v.pins = (const struct hda_pintbl[]) {
+@@ -6066,6 +6123,13 @@
+ 		.chained = true,
+ 		.chain_id = ALC285_FIXUP_THINKPAD_HEADSET_JACK,
+ 	},
++	[ALC287_FIXUP_LENOVO_YOGA_PRO7] = {
++		.type = HDA_FIXUP_FUNC,
++		/* Reuse the DAC routing selected for ThinkPad X1 Gen7 */
++		.v.func = alc285_fixup_thinkpad_x1_gen7,
++		.chained = true,
++		.chain_id = ALC269_FIXUP_LENOVO_XPAD_ACPI,
++	},
+ 	[ALC623_FIXUP_LENOVO_THINKSTATION_P340] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc_fixup_no_shutup,
+@@ -6241,6 +6305,10 @@
+ 		.chained = true,
+ 		.chain_id = ALC269_FIXUP_HEADSET_MODE_NO_HP_MIC
+ 	},
++	[ALC256_FIXUP_XIAOMI_PRO15_RESUME] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc256_fixup_xiaomi_pro15_resume,
++	},
+ 	[ALC287_FIXUP_LEGION_16ACHG6] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc287_fixup_legion_16achg6_speakers,
+@@ -6308,6 +6376,12 @@
+ 		.chained = true,
+ 		.chain_id = ALC269_FIXUP_HEADSET_MODE_NO_HP_MIC
+ 	},
++	[ALC295_FIXUP_FRAMEWORK_LAPTOP_LIMIT_INT_MIC_BOOST] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc269_fixup_limit_int_mic_boost,
++		.chained = true,
++		.chain_id = ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE,
++	},
+ 	[ALC287_FIXUP_LEGION_16ITHG6] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc287_fixup_legion_16ithg6_speakers,
+@@ -6635,14 +6709,18 @@
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc245_tas2781_i2c_hp_fixup_muteled,
+ 	},
++	[ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED_INVERTED] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc245_tas2781_i2c_hp_fixup_muteled_inverted,
++	},
+ 	[ALC288_FIXUP_SURFACE_SWAP_DACS] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc288_fixup_surface_swap_dacs,
+ 	},
+-        [ALC233_FIXUP_LENOVO_GPIO2_MIC_HOTKEY] = {
+-                .type = HDA_FIXUP_FUNC,
+-                .v.func = alc233_fixup_lenovo_gpio2_mic_hotkey,
+-        },
++	[ALC233_FIXUP_LENOVO_GPIO2_MIC_HOTKEY] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc233_fixup_lenovo_gpio2_mic_hotkey,
++	},
+ 	[ALC245_FIXUP_BASS_HP_DAC] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		/* Borrow the DAC routing selected for those Thinkpads */
+@@ -6666,7 +6744,17 @@
+ 			{ 0x12, 0x90a60160 }, /* use as internal mic */
+ 			{ }
+ 		},
+-	}
++	},
++	[ALC245_FIXUP_HP_ENVY_X360_15_FH0XXX] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = cs35l41_fixup_i2c_two,
++		.chained = true,
++		.chain_id = ALC245_FIXUP_HP_X360_MUTE_LEDS
++	},
++	[ALC236_FIXUP_DELL_HP_POP_NOISE] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc285_fixup_invalidate_dacs,
++	},
+ };
+ 
+ static const struct hda_quirk alc269_fixup_tbl[] = {
+@@ -6813,6 +6901,12 @@
+ 	SND_PCI_QUIRK(0x1028, 0x0cc3, "Dell Oasis 14 Low Weight MTL-U", ALC289_FIXUP_DELL_CS35L41_SPI_2),
+ 	SND_PCI_QUIRK(0x1028, 0x0cc4, "Dell Oasis 16 MTL-H/U", ALC289_FIXUP_DELL_CS35L41_SPI_2),
+ 	SND_PCI_QUIRK(0x1028, 0x0cc5, "Dell Oasis 14", ALC289_FIXUP_RTK_AMP_DUAL_SPK),
++	SND_PCI_QUIRK(0x1028, 0x0d56, "Dell Pro Tower QCT1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
++	SND_PCI_QUIRK(0x1028, 0x0d58, "Dell Pro Micro QCM1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
++	SND_PCI_QUIRK(0x1028, 0x0d5a, "Dell Pro Slim QCS1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
++	SND_PCI_QUIRK(0x1028, 0x0e6b, "Dell Pro Tower QCT1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
++	SND_PCI_QUIRK(0x1028, 0x0e6c, "Dell Pro Slim QCS1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
++	SND_PCI_QUIRK(0x1028, 0x0e6d, "Dell Pro Micro QCM1255", ALC236_FIXUP_DELL_HP_POP_NOISE),
+ 	SND_PCI_QUIRK(0x1028, 0x164a, "Dell", ALC293_FIXUP_DELL1_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1028, 0x164b, "Dell", ALC293_FIXUP_DELL1_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x103c, 0x1586, "HP", ALC269_FIXUP_HP_MUTE_LED_MIC2),
+@@ -7084,7 +7178,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8be6, "HP Envy 16", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8be7, "HP Envy 17", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8be8, "HP Envy 17", ALC287_FIXUP_CS35L41_I2C_2),
+-	SND_PCI_QUIRK(0x103c, 0x8be9, "HP Envy 15", ALC287_FIXUP_CS35L41_I2C_2),
++	SND_PCI_QUIRK(0x103c, 0x8be9, "HP Envy x360 2-in-1 Laptop 15-fh0xxx", ALC245_FIXUP_HP_ENVY_X360_15_FH0XXX),
+ 	SND_PCI_QUIRK(0x103c, 0x8bf0, "HP", ALC236_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8c15, "HP Spectre x360 2-in-1 Laptop 14-eu0xxx", ALC245_FIXUP_HP_SPECTRE_X360_EU0XXX),
+ 	SND_PCI_QUIRK(0x103c, 0x8c16, "HP Spectre x360 2-in-1 Laptop 16-aa0xxx", ALC245_FIXUP_HP_SPECTRE_X360_16_AA0XXX),
+@@ -7134,6 +7228,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8ca4, "HP ZBook Fury", ALC245_FIXUP_CS35L41_SPI_2_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8ca7, "HP ZBook Fury", ALC245_FIXUP_CS35L41_SPI_2_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8caf, "HP Elite mt645 G8 Mobile Thin Client", ALC236_FIXUP_HP_MUTE_LED_MICMUTE_VREF),
++	SND_PCI_QUIRK(0x103c, 0x8cbc, "HP Pavilion Laptop 16-ag0xxx", ALC245_FIXUP_HP_X360_MUTE_LEDS),
+ 	SND_PCI_QUIRK(0x103c, 0x8cbd, "HP Pavilion Aero Laptop 13-bg0xxx", ALC245_FIXUP_HP_X360_MUTE_LEDS),
+ 	SND_PCI_QUIRK(0x103c, 0x8cdd, "HP Spectre", ALC245_FIXUP_HP_SPECTRE_X360_EU0XXX),
+ 	SND_PCI_QUIRK(0x103c, 0x8cde, "HP OmniBook Ultra Flip Laptop 14t", ALC245_FIXUP_HP_SPECTRE_X360_EU0XXX),
+@@ -7153,6 +7248,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8d90, "HP EliteBook 16 G12", ALC285_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8d91, "HP ZBook Firefly 14 G12", ALC285_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8d92, "HP ZBook Firefly 16 G12", ALC285_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8dcd, "HP Victus 15-fa2xxx", ALC245_FIXUP_HP_MUTE_LED_COEFBIT),
+ 	SND_PCI_QUIRK(0x103c, 0x8d9b, "HP 17 Turbine OmniBook 7 UMA", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8d9c, "HP 17 Turbine OmniBook 7 DIS", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8d9d, "HP 17 Turbine OmniBook X UMA", ALC287_FIXUP_CS35L41_I2C_2),
+@@ -7161,7 +7257,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8da0, "HP 16 Clipper OmniBook 7(X360)", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8da1, "HP 16 Clipper OmniBook X", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8da7, "HP 14 Enstrom OmniBook X", ALC287_FIXUP_CS35L41_I2C_2),
+-	SND_PCI_QUIRK(0x103c, 0x8da8, "HP 16 Piston OmniBook X", ALC287_FIXUP_CS35L41_I2C_2),
++	SND_PCI_QUIRK(0x103c, 0x8da8, "HP 16 Piston OmniBook X", ALC245_FIXUP_HP_ENVY_X360_15_FH0XXX),
+ 	SND_PCI_QUIRK(0x103c, 0x8dc9, "HP Laptop 15-fc0xxx", ALC236_FIXUP_HP_DMIC),
+ 	SND_PCI_QUIRK(0x103c, 0x8dd4, "HP EliteStudio 8 AIO", ALC274_FIXUP_HP_AIO_BIND_DACS),
+ 	SND_PCI_QUIRK(0x103c, 0x8dd7, "HP Laptop 15-fd0xxx", ALC236_FIXUP_HP_MUTE_LED_COEFBIT2),
+@@ -7221,11 +7317,19 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8ee7, "HP Abe A6U", ALC236_FIXUP_HP_MUTE_LED_MICMUTE_GPIO),
+ 	SND_PCI_QUIRK(0x103c, 0x8f0c, "HP ZBook X G2i 16W", ALC236_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8f0e, "HP ZBook X G2i 16W", ALC236_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f37, "HP EliteBook 6 G2i", ALC236_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f38, "HP EliteBook 6 G2i", ALC236_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f39, "HP EliteBook 6 G2i", ALC236_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f3a, "HP EliteBook 6 G2i", ALC236_FIXUP_HP_GPIO_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f3c, "HP EliteBook 6 G2a", ALC236_FIXUP_HP_MUTE_LED_MICMUTE_VREF),
++	SND_PCI_QUIRK(0x103c, 0x8f3d, "HP EliteBook 6 G2a", ALC236_FIXUP_HP_MUTE_LED_MICMUTE_VREF),
+ 	SND_PCI_QUIRK(0x103c, 0x8f40, "HP ZBook 8 G2a 14", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8f41, "HP ZBook 8 G2a 16", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8f42, "HP ZBook 8 G2a 14W", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8f57, "HP Trekker G7JC", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x103c, 0x8f62, "HP ZBook 8 G2a 16W", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED),
++	SND_PCI_QUIRK(0x103c, 0x8f94, "HP ZBook 8 G2a 14", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED_INVERTED),
++	SND_PCI_QUIRK(0x103c, 0x8f95, "HP ZBook 8 G2a 16", ALC245_FIXUP_HP_TAS2781_I2C_MUTE_LED_INVERTED),
+ 	SND_PCI_QUIRK(0x1043, 0x1024, "ASUS Zephyrus G14 2025", ALC285_FIXUP_ASUS_GA403U_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1043, 0x1032, "ASUS VivoBook X513EA", ALC256_FIXUP_ASUS_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1043, 0x1034, "ASUS GU605C", ALC285_FIXUP_ASUS_GU605_SPI_SPEAKER2_TO_DAC1),
+@@ -7246,6 +7350,7 @@
+ 	SND_PCI_QUIRK(0x1043, 0x11c0, "ASUS X556UR", ALC255_FIXUP_ASUS_MIC_NO_PRESENCE),
+ 	HDA_CODEC_QUIRK(0x1043, 0x1204, "ASUS Strix G16 G615JMR", ALC287_FIXUP_TXNW2781_I2C_ASUS),
+ 	SND_PCI_QUIRK(0x1043, 0x1204, "ASUS Strix G615JHR_JMR_JPR", ALC287_FIXUP_TAS2781_I2C),
++	HDA_CODEC_QUIRK(0x1043, 0x1214, "ASUS ROG Strix G615LP", ALC287_FIXUP_TXNW2781_I2C_ASUS),
+ 	SND_PCI_QUIRK(0x1043, 0x1214, "ASUS Strix G615LH_LM_LP", ALC287_FIXUP_TAS2781_I2C),
+ 	SND_PCI_QUIRK(0x1043, 0x125e, "ASUS Q524UQK", ALC255_FIXUP_ASUS_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1043, 0x1271, "ASUS X430UN", ALC256_FIXUP_ASUS_MIC_NO_PRESENCE),
+@@ -7375,12 +7480,12 @@
+ 	SND_PCI_QUIRK(0x1043, 0x3e00, "ASUS G814FH/FM/FP", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x1043, 0x3e20, "ASUS G814PH/PM/PP", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x1043, 0x3e30, "ASUS TP3607SA", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3ee0, "ASUS Strix G815_JHR_JMR_JPR", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3ef0, "ASUS Strix G635LR_LW_LX", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3f00, "ASUS Strix G815LH_LM_LP", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3f10, "ASUS Strix G835LR_LW_LX", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3f20, "ASUS Strix G615LR_LW", ALC287_FIXUP_TAS2781_I2C),
+-	SND_PCI_QUIRK(0x1043, 0x3f30, "ASUS Strix G815LR_LW", ALC287_FIXUP_TAS2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3ee0, "ASUS Strix G815_JHR_JMR_JPR", ALC287_FIXUP_TXNW2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3ef0, "ASUS Strix G635LR_LW_LX", ALC287_FIXUP_TXNW2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3f00, "ASUS Strix G815LH_LM_LP", ALC287_FIXUP_TXNW2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3f10, "ASUS Strix G835LR_LW_LX", ALC287_FIXUP_TXNW2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3f20, "ASUS Strix G615LR_LW", ALC287_FIXUP_TXNW2781_I2C),
++	SND_PCI_QUIRK(0x1043, 0x3f30, "ASUS Strix G815LR_LW", ALC287_FIXUP_TXNW2781_I2C),
+ 	SND_PCI_QUIRK(0x1043, 0x3fd0, "ASUS B3605CVA", ALC245_FIXUP_CS35L41_SPI_2),
+ 	SND_PCI_QUIRK(0x1043, 0x3ff0, "ASUS B5405CVA", ALC245_FIXUP_CS35L41_SPI_2),
+ 	SND_PCI_QUIRK(0x1043, 0x831a, "ASUS P901", ALC269_FIXUP_STEREO_DMIC),
+@@ -7434,6 +7539,7 @@
+ 	SND_PCI_QUIRK(0x144d, 0xc870, "Samsung Galaxy Book2 Pro (NP950XED)", ALC298_FIXUP_SAMSUNG_AMP_V2_2_AMPS),
+ 	SND_PCI_QUIRK(0x144d, 0xc872, "Samsung Galaxy Book2 Pro (NP950XEE)", ALC298_FIXUP_SAMSUNG_AMP_V2_2_AMPS),
+ 	SND_PCI_QUIRK(0x144d, 0xc886, "Samsung Galaxy Book3 Pro (NP964XFG)", ALC298_FIXUP_SAMSUNG_AMP_V2_4_AMPS),
++	SND_PCI_QUIRK(0x144d, 0xc902, "Samsung Galaxy Book5 360 (NP750QHA)", ALC256_FIXUP_SAMSUNG_HEADPHONE_VERY_QUIET),
+ 	SND_PCI_QUIRK(0x144d, 0xc1ca, "Samsung Galaxy Book3 Pro 360 (NP960QFG)", ALC298_FIXUP_SAMSUNG_AMP_V2_4_AMPS),
+ 	SND_PCI_QUIRK(0x144d, 0xc1cb, "Samsung Galaxy Book3 Pro 360 (NP965QFG)", ALC298_FIXUP_SAMSUNG_AMP_V2_4_AMPS),
+ 	SND_PCI_QUIRK(0x144d, 0xc1cc, "Samsung Galaxy Book3 Ultra (NT960XFH)", ALC298_FIXUP_SAMSUNG_AMP_V2_4_AMPS),
+@@ -7482,6 +7588,7 @@
+ 	SND_PCI_QUIRK(0x1558, 0x51b3, "Clevo NS70AU", ALC256_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1558, 0x5630, "Clevo NP50RNJS", ALC256_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1558, 0x5700, "Clevo X560WN[RST]", ALC256_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
++	SND_PCI_QUIRK(0x1558, 0x6480, "Clevo V6xxAW", ALC245_FIXUP_CLEVO_NOISY_MIC),
+ 	SND_PCI_QUIRK(0x1558, 0x70a1, "Clevo NB70T[HJK]", ALC293_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1558, 0x70b3, "Clevo NK70SB", ALC293_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1558, 0x70f2, "Clevo NH79EPY", ALC293_FIXUP_SYSTEM76_MIC_NO_PRESENCE),
+@@ -7605,6 +7712,7 @@
+ 	SND_PCI_QUIRK(0x17aa, 0x3801, "Lenovo Yoga9 14IAP7", ALC287_FIXUP_YOGA9_14IAP7_BASS_SPK_PIN),
+ 	HDA_CODEC_QUIRK(0x17aa, 0x3802, "DuetITL 2021", ALC287_FIXUP_YOGA7_14ITL_SPEAKERS),
+ 	SND_PCI_QUIRK(0x17aa, 0x3802, "Lenovo Yoga Pro 9 14IRP8", ALC287_FIXUP_TAS2781_I2C),
++	SND_PCI_QUIRK(0x17aa, 0x3811, "Legion S7 15IMH05", ALC287_FIXUP_LEGION_15IMHG05_SPEAKERS),
+ 	SND_PCI_QUIRK(0x17aa, 0x3813, "Legion 7i 15IMHG05", ALC287_FIXUP_LEGION_15IMHG05_SPEAKERS),
+ 	SND_PCI_QUIRK(0x17aa, 0x3818, "Lenovo C940 / Yoga Duet 7", ALC298_FIXUP_LENOVO_C940_DUET7),
+ 	SND_PCI_QUIRK(0x17aa, 0x3819, "Lenovo 13s Gen2 ITL", ALC287_FIXUP_13S_GEN2_SPEAKERS),
+@@ -7630,6 +7738,7 @@
+ 	HDA_CODEC_QUIRK(0x17aa, 0x386e, "Legion Y9000X 2022 IAH7", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x17aa, 0x386e, "Yoga Pro 7 14ARP8", ALC285_FIXUP_SPEAKER2_TO_DAC1),
+ 	HDA_CODEC_QUIRK(0x17aa, 0x38a8, "Legion Pro 7 16ARX8H", ALC287_FIXUP_TAS2781_I2C), /* this must match before PCI SSID 17aa:386f below */
++	HDA_CODEC_QUIRK(0x17aa, 0x38a7, "Legion Pro 7 16ARX8H", ALC287_FIXUP_TAS2781_I2C), /* this must match before PCI SSID 17aa:386f below */
+ 	SND_PCI_QUIRK(0x17aa, 0x386f, "Legion Pro 7i 16IAX7", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x17aa, 0x3870, "Lenovo Yoga 7 14ARB7", ALC287_FIXUP_YOGA7_14ARB7_I2C),
+ 	SND_PCI_QUIRK(0x17aa, 0x3877, "Lenovo Legion 7 Slim 16ARHA7", ALC287_FIXUP_CS35L41_I2C_2),
+@@ -7677,6 +7786,7 @@
+ 	SND_PCI_QUIRK(0x17aa, 0x38df, "Y990 YG DUAL", ALC287_FIXUP_TAS2781_I2C),
+ 	SND_PCI_QUIRK(0x17aa, 0x38f9, "Thinkbook 16P Gen5", ALC287_FIXUP_MG_RTKC_CSAMP_CS35L41_I2C_THINKPAD),
+ 	SND_PCI_QUIRK(0x17aa, 0x38fa, "Thinkbook 16P Gen5", ALC287_FIXUP_MG_RTKC_CSAMP_CS35L41_I2C_THINKPAD),
++	SND_PCI_QUIRK(0x17aa, 0x38fc, "Lenovo Yoga Pro 7 15ASH11", ALC287_FIXUP_LENOVO_YOGA_PRO7),
+ 	SND_PCI_QUIRK(0x17aa, 0x38fd, "ThinkBook plus Gen5 Hybrid", ALC287_FIXUP_TAS2781_I2C),
+ 	SND_PCI_QUIRK(0x17aa, 0x3902, "Lenovo E50-80", ALC269_FIXUP_DMIC_THINKPAD_ACPI),
+ 	SND_PCI_QUIRK(0x17aa, 0x390d, "Lenovo Yoga Pro 7 14ASP10", ALC287_FIXUP_YOGA9_14IAP7_BASS_SPK_PIN),
+@@ -7745,10 +7855,12 @@
+ 	SND_PCI_QUIRK(0x1d05, 0x300f, "TongFang X6AR5xxY", ALC2XX_FIXUP_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1d05, 0x3019, "TongFang X6FR5xxY", ALC2XX_FIXUP_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1d05, 0x3031, "TongFang X6AR55xU", ALC2XX_FIXUP_HEADSET_MIC),
++	SND_PCI_QUIRK(0x1d05, 0x3034, "TongFang X6xx45xU", ALC2XX_FIXUP_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1d17, 0x3288, "Haier Boyue G42", ALC269VC_FIXUP_ACER_VCOPPERBOX_PINS),
+ 	SND_PCI_QUIRK(0x1d72, 0x1602, "RedmiBook", ALC255_FIXUP_XIAOMI_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1d72, 0x1701, "XiaomiNotebook Pro", ALC298_FIXUP_DELL1_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0x1d72, 0x1901, "RedmiBook 14", ALC256_FIXUP_ASUS_HEADSET_MIC),
++	SND_PCI_QUIRK(0x1d72, 0x1905, "Xiaomi Mi Laptop Pro 15", ALC256_FIXUP_XIAOMI_PRO15_RESUME),
+ 	SND_PCI_QUIRK(0x1d72, 0x1945, "Redmi G", ALC256_FIXUP_ASUS_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1d72, 0x1947, "RedmiBook Air", ALC255_FIXUP_XIAOMI_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1e39, 0xca14, "MEDION NM14LNL", ALC233_FIXUP_MEDION_MTL_SPK),
+@@ -7766,6 +7878,7 @@
+ 	SND_PCI_QUIRK(0x2782, 0x1705, "MEDION E15433", ALC269VC_FIXUP_INFINIX_Y4_MAX),
+ 	SND_PCI_QUIRK(0x2782, 0x1707, "Vaio VJFE-ADL", ALC298_FIXUP_SPK_VOLUME),
+ 	SND_PCI_QUIRK(0x2782, 0x4900, "MEDION E15443", ALC233_FIXUP_MEDION_MTL_SPK),
++	SND_PCI_QUIRK(0x2782, 0xa212, "Lunnen Ground 14", ALC269VC_FIXUP_LUNNEN_GROUND_14),
+ 	SND_PCI_QUIRK(0x7017, 0x2014, "Star Labs StarFighter", ALC233_FIXUP_STARLABS_STARFIGHTER),
+ 	SND_PCI_QUIRK(0x8086, 0x2074, "Intel NUC 8", ALC233_FIXUP_INTEL_NUC8_DMIC),
+ 	SND_PCI_QUIRK(0x8086, 0x2080, "Intel NUC 8 Rugged", ALC256_FIXUP_INTEL_NUC8_RUGGED),
+@@ -7776,7 +7889,8 @@
+ 	SND_PCI_QUIRK(0xf111, 0x0009, "Framework Laptop", ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0xf111, 0x000b, "Framework Laptop", ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE),
+ 	SND_PCI_QUIRK(0xf111, 0x000c, "Framework Laptop", ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE),
+-	SND_PCI_QUIRK(0xf111, 0x000f, "Framework Laptop", ALC295_FIXUP_FRAMEWORK_LAPTOP_MIC_NO_PRESENCE),
++	SND_PCI_QUIRK(0xf111, 0x000f, "Framework Laptop 13 Pro PTL", ALC295_FIXUP_FRAMEWORK_LAPTOP_LIMIT_INT_MIC_BOOST),
++	SND_PCI_QUIRK(0xf111, 0x010f, "Framework Laptop 13 PTL", ALC295_FIXUP_FRAMEWORK_LAPTOP_LIMIT_INT_MIC_BOOST),
+ 
+ #if 0
+ 	/* Below is a quirk table taken from the old code.
+--- a/codecs/side-codecs/cs35l41_hda.c
++++ b/codecs/side-codecs/cs35l41_hda.c
+@@ -1325,6 +1325,43 @@
+ 	return snd_ctl_enum_info(uinfo, 1, ARRAY_SIZE(cs35l41_hda_fw_ids), cs35l41_hda_fw_ids);
+ }
+ 
++static void cs35l41_remove_controls(struct cs35l41_hda *cs35l41)
++{
++	if (!cs35l41->codec)
++		return;
++
++	snd_ctl_remove(cs35l41->codec->card, cs35l41->mute_override_ctl);
++	cs35l41->mute_override_ctl = NULL;
++
++	snd_ctl_remove(cs35l41->codec->card, cs35l41->fw_load_ctl);
++	cs35l41->fw_load_ctl = NULL;
++
++	snd_ctl_remove(cs35l41->codec->card, cs35l41->fw_type_ctl);
++	cs35l41->fw_type_ctl = NULL;
++}
++
++static int cs35l41_add_control(struct cs35l41_hda *cs35l41,
++			       struct snd_kcontrol_new *ctl,
++			       struct snd_kcontrol **kctl)
++{
++	int ret;
++
++	*kctl = snd_ctl_new1(ctl, cs35l41);
++	if (!*kctl)
++		return -ENOMEM;
++
++	ret = snd_ctl_add(cs35l41->codec->card, *kctl);
++	if (ret) {
++		dev_err(cs35l41->dev, "Failed to add KControl %s = %d\n", ctl->name, ret);
++		*kctl = NULL;
++		return ret;
++	}
++
++	dev_dbg(cs35l41->dev, "Added Control %s\n", ctl->name);
++
++	return 0;
++}
++
+ static int cs35l41_create_controls(struct cs35l41_hda *cs35l41)
+ {
+ 	char fw_type_ctl_name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
+@@ -1360,32 +1397,23 @@
+ 	scnprintf(mute_override_ctl_name, SNDRV_CTL_ELEM_ID_NAME_MAXLEN, "%s Forced Mute Status",
+ 		  cs35l41->amp_name);
+ 
+-	ret = snd_ctl_add(cs35l41->codec->card, snd_ctl_new1(&fw_type_ctl, cs35l41));
+-	if (ret) {
+-		dev_err(cs35l41->dev, "Failed to add KControl %s = %d\n", fw_type_ctl.name, ret);
+-		return ret;
+-	}
+-
+-	dev_dbg(cs35l41->dev, "Added Control %s\n", fw_type_ctl.name);
+-
+-	ret = snd_ctl_add(cs35l41->codec->card, snd_ctl_new1(&fw_load_ctl, cs35l41));
+-	if (ret) {
+-		dev_err(cs35l41->dev, "Failed to add KControl %s = %d\n", fw_load_ctl.name, ret);
+-		return ret;
+-	}
+-
+-	dev_dbg(cs35l41->dev, "Added Control %s\n", fw_load_ctl.name);
++	ret = cs35l41_add_control(cs35l41, &fw_type_ctl, &cs35l41->fw_type_ctl);
++	if (ret)
++		goto err;
+ 
+-	ret = snd_ctl_add(cs35l41->codec->card, snd_ctl_new1(&mute_override_ctl, cs35l41));
+-	if (ret) {
+-		dev_err(cs35l41->dev, "Failed to add KControl %s = %d\n", mute_override_ctl.name,
+-			ret);
+-		return ret;
+-	}
++	ret = cs35l41_add_control(cs35l41, &fw_load_ctl, &cs35l41->fw_load_ctl);
++	if (ret)
++		goto err;
+ 
+-	dev_dbg(cs35l41->dev, "Added Control %s\n", mute_override_ctl.name);
++	ret = cs35l41_add_control(cs35l41, &mute_override_ctl, &cs35l41->mute_override_ctl);
++	if (ret)
++		goto err;
+ 
+ 	return 0;
++
++err:
++	cs35l41_remove_controls(cs35l41);
++	return ret;
+ }
+ 
+ static bool cs35l41_dsm_supported(acpi_handle handle, unsigned int commands)
+@@ -1406,10 +1434,19 @@
+ 	guid_parse(CS35L41_UUID, &guid);
+ 
+ 	if (cs35l41_dsm_supported(handle, CS35L41_DSM_GET_MUTE)) {
+-		ret = acpi_evaluate_dsm(handle, &guid, 0, CS35L41_DSM_GET_MUTE, NULL);
++		ret = acpi_evaluate_dsm_typed(handle, &guid, 0,
++			      CS35L41_DSM_GET_MUTE, NULL,
++			      ACPI_TYPE_BUFFER);
++
+ 		if (!ret)
+ 			return -EINVAL;
++		if (!ret->buffer.length || !ret->buffer.pointer) {
++			ACPI_FREE(ret);
++			return -EINVAL;
++		}
++
+ 		mute = *ret->buffer.pointer;
++		ACPI_FREE(ret);
+ 		dev_dbg(cs35l41->dev, "CS35L41_DSM_GET_MUTE: %d\n", mute);
+ 	}
+ 
+@@ -1522,6 +1559,10 @@
+ 		device_link_remove(&cs35l41->codec->core.dev, cs35l41->dev);
+ 		unlock_system_sleep(sleep_flags);
+ 		memset(comp, 0, sizeof(*comp));
++
++		cs35l41_remove_controls(cs35l41);
++		cancel_work_sync(&cs35l41->fw_load_work);
++		cs35l41->codec = NULL;
+ 	}
+ }
+ 
+@@ -1896,8 +1937,10 @@
+ 
+ 	cs35l41->dacpi = adev;
+ 	physdev = get_device(acpi_get_first_physical_node(adev));
+-	if (!physdev)
++	if (!physdev) {
++		acpi_dev_put(adev);
+ 		return -ENODEV;
++	}
+ 
+ 	sub = acpi_get_subsystem_id(ACPI_HANDLE(physdev));
+ 	if (IS_ERR(sub))
+@@ -2058,6 +2101,7 @@
+ 	struct cs35l41_hda *cs35l41 = dev_get_drvdata(dev);
+ 
+ 	component_del(cs35l41->dev, &cs35l41_hda_comp_ops);
++	cancel_work_sync(&cs35l41->fw_load_work);
+ 
+ 	pm_runtime_get_sync(cs35l41->dev);
+ 	pm_runtime_dont_use_autosuspend(cs35l41->dev);
+--- a/codecs/side-codecs/cs35l41_hda.h
++++ b/codecs/side-codecs/cs35l41_hda.h
+@@ -57,6 +57,8 @@
+ 	SPI
+ };
+ 
++struct snd_kcontrol;
++
+ struct cs35l41_hda {
+ 	struct device *dev;
+ 	struct regmap *regmap;
+@@ -75,6 +77,9 @@
+ 	int speaker_id;
+ 	struct mutex fw_mutex;
+ 	struct work_struct fw_load_work;
++	struct snd_kcontrol *fw_type_ctl;
++	struct snd_kcontrol *fw_load_ctl;
++	struct snd_kcontrol *mute_override_ctl;
+ 
+ 	struct regmap_irq_chip_data *irq_data;
+ 	bool firmware_running;
+--- a/codecs/side-codecs/cs35l56_hda.c
++++ b/codecs/side-codecs/cs35l56_hda.c
+@@ -180,11 +180,15 @@
+ {
+ 	struct cs35l56_hda *cs35l56 = snd_kcontrol_chip(kcontrol);
+ 	unsigned int reg_val;
+-	int i;
++	int i, ret;
+ 
+ 	cs35l56_hda_wait_dsp_ready(cs35l56);
+ 
+-	regmap_read(cs35l56->base.regmap, kcontrol->private_value, &reg_val);
++	ret = regmap_read(cs35l56->base.regmap, kcontrol->private_value,
++			  &reg_val);
++	if (ret)
++		return ret;
++
+ 	reg_val &= CS35L56_ASP_TXn_SRC_MASK;
+ 
+ 	for (i = 0; i < CS35L56_NUM_INPUT_SRC; ++i) {
+@@ -203,15 +207,20 @@
+ 	struct cs35l56_hda *cs35l56 = snd_kcontrol_chip(kcontrol);
+ 	unsigned int item = ucontrol->value.enumerated.item[0];
+ 	bool changed;
++	int ret;
+ 
+ 	if (item >= CS35L56_NUM_INPUT_SRC)
+ 		return -EINVAL;
+ 
+ 	cs35l56_hda_wait_dsp_ready(cs35l56);
+ 
+-	regmap_update_bits_check(cs35l56->base.regmap, kcontrol->private_value,
+-				 CS35L56_INPUT_MASK, cs35l56_tx_input_values[item],
+-				 &changed);
++	ret = regmap_update_bits_check(cs35l56->base.regmap,
++				       kcontrol->private_value,
++				       CS35L56_INPUT_MASK,
++				       cs35l56_tx_input_values[item],
++				       &changed);
++	if (ret)
++		return ret;
+ 
+ 	return changed;
+ }
+@@ -967,6 +976,7 @@
+ static int cs35l56_hda_fixup_yoga9(struct cs35l56_hda *cs35l56, int *bus_addr)
+ {
+ 	/* The cirrus,dev-index property has the wrong values */
++	cs35l56->num_amps = 2;
+ 	switch (*bus_addr) {
+ 	case 0x30:
+ 		cs35l56->index = 1;
+@@ -1015,8 +1025,7 @@
+ 	u32 values[HDA_MAX_COMPONENTS];
+ 	char hid_string[8];
+ 	struct acpi_device *adev;
+-	const char *property, *sub;
+-	size_t nval;
++	const char *property;
+ 	int i, ret;
+ 
+ 	/*
+@@ -1032,12 +1041,14 @@
+ 			return -ENODEV;
+ 		}
+ 		ACPI_COMPANION_SET(cs35l56->base.dev, adev);
++		acpi_dev_put(adev);
+ 	}
+ 
+ 	/* Initialize things that could be overwritten by a fixup */
+ 	cs35l56->index = -1;
+ 
+-	sub = acpi_get_subsystem_id(ACPI_HANDLE(cs35l56->base.dev));
++	const char *sub __free(kfree) = acpi_get_subsystem_id(ACPI_HANDLE(cs35l56->base.dev));
++
+ 	ret = cs35l56_hda_apply_platform_fixups(cs35l56, sub, &id);
+ 	if (ret)
+ 		return ret;
+@@ -1052,13 +1063,14 @@
+ 			ret = -EINVAL;
+ 			goto err;
+ 		}
+-		nval = ret;
++		cs35l56->num_amps = ret;
+ 
+-		ret = device_property_read_u32_array(cs35l56->base.dev, property, values, nval);
++		ret = device_property_read_u32_array(cs35l56->base.dev, property, values,
++						     cs35l56->num_amps);
+ 		if (ret)
+ 			goto err;
+ 
+-		for (i = 0; i < nval; i++) {
++		for (i = 0; i < cs35l56->num_amps; i++) {
+ 			if (values[i] == id) {
+ 				cs35l56->index = i;
+ 				break;
+@@ -1081,17 +1093,19 @@
+ 			 "Read ACPI _SUB failed(%ld): fallback to generic firmware\n",
+ 			 PTR_ERR(sub));
+ 	} else {
+-		ret = cirrus_scodec_get_speaker_id(cs35l56->base.dev, cs35l56->index, nval, -1);
++		ret = cirrus_scodec_get_speaker_id(cs35l56->base.dev, cs35l56->index,
++						   cs35l56->num_amps, -1);
+ 		if (ret == -ENOENT) {
+-			cs35l56->system_name = sub;
++			cs35l56->system_name = devm_kstrdup(cs35l56->base.dev, sub, GFP_KERNEL);
+ 		} else if (ret >= 0) {
+-			cs35l56->system_name = kasprintf(GFP_KERNEL, "%s-spkid%d", sub, ret);
+-			kfree(sub);
+-			if (!cs35l56->system_name)
+-				return -ENOMEM;
++			cs35l56->system_name = devm_kasprintf(cs35l56->base.dev, GFP_KERNEL,
++							      "%s-spkid%d", sub, ret);
+ 		} else {
+ 			return ret;
+ 		}
++
++		if (!cs35l56->system_name)
++			return -ENOMEM;
+ 	}
+ 
+ 	cs35l56->base.reset_gpio = devm_gpiod_get_index_optional(cs35l56->base.dev,
+@@ -1242,7 +1256,6 @@
+ 
+ 	cs_dsp_remove(&cs35l56->cs_dsp);
+ 
+-	kfree(cs35l56->system_name);
+ 	pm_runtime_put_noidle(cs35l56->base.dev);
+ 
+ 	gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 0);
+--- a/codecs/side-codecs/cs35l56_hda.h
++++ b/codecs/side-codecs/cs35l56_hda.h
+@@ -26,6 +26,7 @@
+ 	struct work_struct dsp_work;
+ 
+ 	int index;
++	int num_amps;
+ 	const char *system_name;
+ 	const char *amp_name;
+ 
+--- a/codecs/side-codecs/tas2781_hda_i2c.c
++++ b/codecs/side-codecs/tas2781_hda_i2c.c
+@@ -588,6 +588,9 @@
+ 		comp->playback_hook = NULL;
+ 	}
+ 
++	request_firmware_nowait_cancel(tas_hda->priv->dev, tas_hda->priv,
++				       tasdev_fw_ready);
++
+ 	tas2781_hda_remove_controls(tas_hda);
+ 
+ 	tasdevice_config_info_remove(tas_hda->priv);
+--- a/codecs/side-codecs/tas2781_hda_spi.c
++++ b/codecs/side-codecs/tas2781_hda_spi.c
+@@ -132,10 +132,18 @@
+ 	int ret, val;
+ 
+ 	/*
+-	 * In our TAS2781 SPI mode, read/write was masked in last bit of
+-	 * address, it cause regmap_update_bits() not work as expected.
++	 * In TAS2781 SPI mode, when accessing non-book-zero or page numbers
++	 * greater than 1 in book 0, an additional byte must be read. The
++	 * first byte in such cases is a dummy byte and should be ignored.
+ 	 */
+-	ret = tasdevice_dev_read(tas_priv, chn, reg, &val);
++	if ((TASDEVICE_BOOK_ID(reg) > 0) || (TASDEVICE_PAGE_ID(reg) > 1)) {
++		unsigned char buf[2];
++
++		ret = tasdevice_dev_bulk_read(tas_priv, chn, reg, buf, 2);
++		val = buf[1];
++	} else {
++		ret = tasdevice_dev_read(tas_priv, chn, reg, &val);
++	}
+ 	if (ret < 0) {
+ 		dev_err(tas_priv->dev, "%s, E=%d\n", __func__, ret);
+ 		return ret;
+@@ -182,15 +190,15 @@
+ 		gpiod_set_value_cansleep(tas_dev->reset, 0);
+ 		fsleep(800);
+ 		gpiod_set_value_cansleep(tas_dev->reset, 1);
+-	} else {
+-		ret = tasdevice_dev_write(tas_dev, tas_dev->index,
+-			TASDEVICE_REG_SWRESET, TASDEVICE_REG_SWRESET_RESET);
+-		if (ret < 0) {
+-			dev_err(tas_dev->dev, "dev sw-reset fail, %d\n", ret);
+-			return;
+-		}
+-		fsleep(1000);
+ 	}
++
++	ret = tasdevice_dev_write(tas_dev, tas_dev->index,
++		TASDEVICE_REG_SWRESET, TASDEVICE_REG_SWRESET_RESET);
++	if (ret < 0) {
++		dev_err(tas_dev->dev, "dev sw-reset fail, %d\n", ret);
++		return;
++	}
++	fsleep(1000);
+ }
+ 
+ static int tascodec_spi_init(struct tasdevice_priv *tas_priv,
+@@ -742,6 +750,9 @@
+ 		comp->playback_hook = NULL;
+ 	}
+ 
++	request_firmware_nowait_cancel(tas_priv->dev, tas_priv,
++				       tasdev_fw_ready);
++
+ 	tas2781_hda_remove_controls(tas_hda);
+ 
+ 	tasdevice_config_info_remove(tas_priv);
+@@ -788,6 +799,7 @@
+ 	}
+ 	if (strstr(dev_name(&spi->dev), "TXNW2781")) {
+ 		device_name = "TXNW2781";
++		tas_hda->priv->chip_id = TAS2781;
+ 	} else {
+ 		dev_err(tas_priv->dev, "Unmatched spi dev %s\n",
+ 			dev_name(&spi->dev));
+--- a/common/codec.c
++++ b/common/codec.c
+@@ -2529,7 +2529,10 @@
+ static int spdif_share_sw_get(struct snd_kcontrol *kcontrol,
+ 			      struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct hda_multi_out *mout = snd_kcontrol_chip(kcontrol);
++	struct hda_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct hda_multi_out *mout = (void *)kcontrol->private_value;
++
++	guard(mutex)(&codec->spdif_mutex);
+ 	ucontrol->value.integer.value[0] = mout->share_spdif;
+ 	return 0;
+ }
+@@ -2537,9 +2540,15 @@
+ static int spdif_share_sw_put(struct snd_kcontrol *kcontrol,
+ 			      struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct hda_multi_out *mout = snd_kcontrol_chip(kcontrol);
+-	mout->share_spdif = !!ucontrol->value.integer.value[0];
+-	return 0;
++	struct hda_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct hda_multi_out *mout = (void *)kcontrol->private_value;
++	bool val = !!ucontrol->value.integer.value[0];
++	int change;
++
++	guard(mutex)(&codec->spdif_mutex);
++	change = mout->share_spdif != val;
++	mout->share_spdif = val;
++	return change;
+ }
+ 
+ static const struct snd_kcontrol_new spdif_share_sw = {
+@@ -2550,6 +2559,14 @@
+ 	.put = spdif_share_sw_put,
+ };
+ 
++static void notify_spdif_share_sw(struct hda_codec *codec,
++				  struct hda_multi_out *mout)
++{
++	if (mout->share_spdif_kctl)
++		snd_ctl_notify_one(codec->card, SNDRV_CTL_EVENT_MASK_VALUE,
++				   mout->share_spdif_kctl, 0);
++}
++
+ /**
+  * snd_hda_create_spdif_share_sw - create Default PCM switch
+  * @codec: the HDA codec
+@@ -2559,15 +2576,24 @@
+ 				  struct hda_multi_out *mout)
+ {
+ 	struct snd_kcontrol *kctl;
++	int err;
+ 
+ 	if (!mout->dig_out_nid)
+ 		return 0;
+ 
+-	kctl = snd_ctl_new1(&spdif_share_sw, mout);
++	kctl = snd_ctl_new1(&spdif_share_sw, codec);
+ 	if (!kctl)
+ 		return -ENOMEM;
+-	/* ATTENTION: here mout is passed as private_data, instead of codec */
+-	return snd_hda_ctl_add(codec, mout->dig_out_nid, kctl);
++	/* snd_ctl_new1() stores @codec in private_data; stash @mout in
++	 * private_value for the share-switch callbacks and cache the
++	 * assigned control for forced-disable notifications.
++	 */
++	kctl->private_value = (unsigned long)mout;
++	err = snd_hda_ctl_add(codec, mout->dig_out_nid, kctl);
++	if (err < 0)
++		return err;
++	mout->share_spdif_kctl = kctl;
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(snd_hda_create_spdif_share_sw);
+ 
+@@ -3701,6 +3727,8 @@
+ 				  struct hda_pcm_stream *hinfo)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
++	bool notify_share_sw = false;
++
+ 	runtime->hw.channels_max = mout->max_channels;
+ 	if (mout->dig_out_nid) {
+ 		if (!mout->analog_rates) {
+@@ -3729,10 +3757,12 @@
+ 					hinfo->maxbps = mout->spdif_maxbps;
+ 			} else {
+ 				mout->share_spdif = 0;
+-				/* FIXME: need notify? */
++				notify_share_sw = true;
+ 			}
+ 		}
+ 	}
++	if (notify_share_sw)
++		notify_spdif_share_sw(codec, mout);
+ 	return snd_pcm_hw_constraint_step(substream->runtime, 0,
+ 					  SNDRV_PCM_HW_PARAM_CHANNELS, 2);
+ }
+--- a/common/hda_local.h
++++ b/common/hda_local.h
+@@ -221,6 +221,7 @@
+ 	unsigned int spdif_rates;
+ 	unsigned int spdif_maxbps;
+ 	u64 spdif_formats;
++	struct snd_kcontrol *share_spdif_kctl; /* cached shared SPDIF switch */
+ };
+ 
+ int snd_hda_create_spdif_share_sw(struct hda_codec *codec,
+--- a/common/jack.c
++++ b/common/jack.c
+@@ -58,6 +58,12 @@
+ 				  AC_VERB_GET_PIN_SENSE, dev_id);
+ 	if (codec->inv_jack_detect)
+ 		val ^= AC_PINSENSE_PRESENCE;
++	if (codec->eld_jack_detect) {
++		if (val & AC_PINSENSE_ELDV)
++			val |= AC_PINSENSE_PRESENCE;
++		else
++			val &= ~AC_PINSENSE_PRESENCE;
++	}
+ 	return val;
+ }
+ 
+--- a/controllers/Kconfig
++++ b/controllers/Kconfig
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ config SND_HDA_INTEL
+ 	tristate "HD Audio PCI"
+-	depends on SND_PCI
++	depends on PCI
+ 	select SND_HDA
+ 	select SND_INTEL_DSP_CONFIG
+ 	help
+--- a/core/regmap.c
++++ b/core/regmap.c
+@@ -214,7 +214,7 @@
+ 	err = snd_hdac_exec_verb(codec, verb, 0, NULL);
+ 	if (err < 0)
+ 		return err;
+-	verb = (reg & ~0xfffff) | (AC_VERB_GET_COEF_INDEX << 8);
++	verb = (reg & ~0xfffff) | (AC_VERB_GET_PROC_COEF << 8);
+ 	return snd_hdac_exec_verb(codec, verb, 0, val);
+ }
+ 
+@@ -232,7 +232,7 @@
+ 	err = snd_hdac_exec_verb(codec, verb, 0, NULL);
+ 	if (err < 0)
+ 		return err;
+-	verb = (reg & ~0xfffff) | (AC_VERB_GET_COEF_INDEX << 8) |
++	verb = (reg & ~0xfffff) | (AC_VERB_SET_PROC_COEF << 8) |
+ 		(val & 0xffff);
+ 	return snd_hdac_exec_verb(codec, verb, 0, NULL);
+ }

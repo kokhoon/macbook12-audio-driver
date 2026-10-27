@@ -57,6 +57,18 @@ if (( major_version > 6 || (major_version == 6 && minor_version >= 17) )); then
     mv $hda_dir/codecs/cirrus/cs420x.c $hda_dir/codecs/cirrus/cs420x.c.orig
     cp $patch_dir/cs420x.c $patch_dir/patch_cirrus_a1534_setup.h $patch_dir/patch_cirrus_a1534_pcm.h $patch_dir/patch_cirrus_a1534_verbs.h $hda_dir/codecs/cirrus
     cp $patch_dir/$makefile_name $hda_dir/codecs/cirrus/Makefile
+
+    # Ubuntu (HWE) kernels are patched trees: the vanilla tarball's internal
+    # sound/hda headers can drift from what the running kernel was built with
+    # (e.g. hda_multi_out gained share_spdif_kctl, shifting hda_gen_spec
+    # offsets by 8 bytes and oopsing cs420x on gen.pcm_rec access).
+    # Re-apply the Ubuntu hda delta so the out-of-tree module sees the same
+    # struct layouts as the in-tree modules it calls into.
+    if [ -f $patch_dir/ubuntu-hwe-7.0-hda.patch ]; then
+        echo "applying Ubuntu HWE hda delta: $patch_dir/ubuntu-hwe-7.0-hda.patch"
+        patch -p1 -N -r /dev/null -s -d $hda_dir < $patch_dir/ubuntu-hwe-7.0-hda.patch || \
+            echo "WARNING: ubuntu-hwe-7.0-hda.patch did not apply cleanly - struct layout mismatch likely"
+    fi
 else
     makefile_name="Makefile_cirrus"
     tar --strip-components=3 -xvf $build_dir/linux-$kernel_version.tar.xz --directory=build/ linux-$kernel_version/sound/pci/hda

@@ -33,6 +33,11 @@ build_dir="build"
 patch_dir='patch_cirrus'
 hda_dir="$build_dir/hda"
 
+# keep a backup of any existing (possibly hand-verified) tree before wiping it
+if [[ -d $hda_dir ]]; then
+    [[ -d ${hda_dir}.prev ]] && rm -rf ${hda_dir}.prev
+    cp -a $hda_dir ${hda_dir}.prev
+fi
 [[ -d $hda_dir ]] && rm -rf $hda_dir
 [[ ! -d $build_dir ]] && mkdir $build_dir
 
@@ -66,8 +71,19 @@ if (( major_version > 6 || (major_version == 6 && minor_version >= 17) )); then
     # struct layouts as the in-tree modules it calls into.
     if [ -f $patch_dir/ubuntu-hwe-7.0-hda.patch ]; then
         echo "applying Ubuntu HWE hda delta: $patch_dir/ubuntu-hwe-7.0-hda.patch"
-        patch -p1 -N -r /dev/null -s -d $hda_dir < $patch_dir/ubuntu-hwe-7.0-hda.patch || \
-            echo "WARNING: ubuntu-hwe-7.0-hda.patch did not apply cleanly - struct layout mismatch likely"
+        if ! patch -p1 -N -r /tmp/hda.rej -s -d $hda_dir < $patch_dir/ubuntu-hwe-7.0-hda.patch; then
+            rej_lines=$(grep -c . /tmp/hda.rej 2>/dev/null) || rej_lines=0
+            # on Ubuntu (-generic) kernels a non-clean HWE delta means the module
+            # will be built against the wrong struct layout -> oops. fail hard.
+            case $(uname -r) in
+            *-generic) echo "ERROR: ubuntu-hwe-7.0-hda.patch did not apply cleanly ($rej_lines rejected lines)"
+                       echo "regenerate the patch from the matching Launchpad .diff.gz, then re-run" >&2
+                       exit 1;;
+            *) echo "WARNING: ubuntu-hwe-7.0-hda.patch did not apply cleanly ($rej_lines rejected lines) - continuing with vanilla headers"
+               echo "(expected on non-Ubuntu/vanilla kernels)";;
+            esac
+        fi
+        rm -f /tmp/hda.rej
     fi
 else
     makefile_name="Makefile_cirrus"
